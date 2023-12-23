@@ -1,64 +1,298 @@
-# Prompt user to enter the name of the source computer
-$sourceComputer = Read-Host "Enter the name of the source computer"
+# Hide all text in the CLI session prior to prompting the user to enter the name of the source computer
+Clear-Host
 
-# Check if user has access to source computer
-try {
-    $testConnection = Test-Connection -ComputerName $sourceComputer -Count 1 -ErrorAction Stop
+# Define the ASCII art as a here-string
+$asciiArt = @"
+ __                              __                    
+/ _\ _   _  _ __   _ __   _   _ / _\  __ _ __   __ ___ 
+\ \ | | | || '_ \ | '_ \ | | | |\ \  / _` |\ \ / // _ \
+_\ \| |_| || | | || | | || |_| |_\ \| (_| | \ V /|  __/
+\__/ \__,_||_| |_||_| |_| \__, |\__/ \__,_|  \_/  \___|
+                          |___/                        
+
+"@
+
+$welcomeMessage = "SunnySave - Backup files with ease."
+
+# Calculate the padding needed for each line to center the ASCII art
+$consoleWidth = $Host.UI.RawUI.WindowSize.Width
+$padding = ($consoleWidth - $asciiArt.Length) / 2
+if ($padding -lt 0) {
+    $padding = 0
 }
-catch {
-    Write-Host "Unable to connect to $sourceComputer."
+$paddingString = ' ' * $padding
+Write-Host ($paddingString + $welcomeMessage)
+
+# Split the ASCII art into lines and add padding to center each line
+$artLines = $asciiArt -split "`n"
+foreach ($line in $artLines) {
+    Write-Host ($paddingString + $line)
+}
+
+Write-Host ""
+
+$welcomeMessage = "SunnySave - Backup files with ease."
+$consoleWidth = $Host.UI.RawUI.WindowSize.Width
+$padding = ($consoleWidth - $welcomeMessage.Length) / 2
+$left = [Math]::Max($padding, 0)
+Write-Host (' ' * $left) + $welcomeMessage
+
+Write-Host "`n"
+
+$welcomeMessage = "Only run on the SMA network."
+$consoleWidth = $Host.UI.RawUI.WindowSize.Width
+$padding = ($consoleWidth - $welcomeMessage.Length) / 2
+$left = [Math]::Max($padding, 0)
+Write-Host (' ' * $left) + $welcomeMessage
+
+Write-Host "`n"
+
+$welcomeMessage = "Load the Powershell Script from an Elevated PowerShell session."
+$consoleWidth = $Host.UI.RawUI.WindowSize.Width
+$padding = ($consoleWidth - $welcomeMessage.Length) / 2
+$left = [Math]::Max($padding, 0)
+Write-Host (' ' * $left) + $welcomeMessage
+
+Write-Host "`n"
+
+# Excluded Folders
+$excludedFolders = @(
+    "AppData",
+    "Local Settings",
+    "Application Data"
+)
+
+# Excluded Files
+$excludedFiles = @(
+    "*.iso",
+    "*.dll",
+    "*.exe",
+    "*.tmp",
+    "*.bak",
+    "*.lnk",
+    "*.swp",
+    "*.lock",
+    "*.pid"
+)
+
+Write-Host "`n"
+
+# Retrieve computer names from the Active Directory
+$computerNames = Get-ADComputer -Filter { Name -like 'NB*' -or Name -like 'TAB*' -or Name -like 'PC*' -or Name -like 'SVR*' } -Properties Name | Select-Object -ExpandProperty Name | Sort-Object
+
+# Check if any computers were found
+if ($computerNames.Count -eq 0) {
+    Write-Host "No computers found on the network."
     exit
 }
 
-# List user folders in C:\Users\
+# Get the current user account running the script
+$currentUserName = $env:UserName
+
+# Prompt the user to enter the source computer name
+$sourceComputer = Read-Host "Enter the name of the computer you want to copy files from"
+
+# Start the WinRM service on the source computer
+Invoke-Command -ComputerName $sourceComputer -ScriptBlock { Start-Service WinRM }
+
+Write-Host ""
+
+# List user folders in the C:\Users\ directory on the source computer
 Write-Host "`nThe following user folders are available on ${sourceComputer}:`n"
 Invoke-Command -ComputerName $sourceComputer -ScriptBlock {
     param($path)
     Write-Host "Folders in the C:\Users directory of $($env:COMPUTERNAME):`n$($(Get-ChildItem $path -Directory | Select-Object -ExpandProperty Name) -join "`n")"
 } -ArgumentList "\\$sourceComputer\C`$\Users"
 
-# Prompt user to select the source folder
-$sourceFolder = Read-Host "Enter the name of the source folder (e.g. JohnDoe)"
+Write-Host ""
 
-$sourcePath = "\\$sourceComputer\C`$\Users\$sourceFolder"
+# Prompt user to select the source folder
+$sourceFolder = Read-Host "Enter the name of the User folder (e.g. Username)"
+$sourcePath = "\\$sourceComputer\C`$\Users\$sourceFolder\"
+
+# Set the credentials for authenticating with Active Directory
+$credential = Get-Credential
+
+# Removes PSDrive if one already exists. If remomved you will encounter an error
+Remove-PSDrive -Name $sourceComputer -ErrorAction SilentlyContinue
+
+# Connect to the source computer using the domain account
+New-PSDrive -Name $sourceComputer -PSProvider FileSystem -Root "\\$sourceComputer\c$" -Credential $credential
 
 # Test if the current user has permission to access the source folder
 if (-not (Test-Path $sourcePath -PathType Container)) {
-    Write-Host "You do not have permission to access the folder."
+    Write-Host "Sorry, you do not have permission to access the source folder. Please check your permissions and try again."
     exit
 }
+Write-Host ""
 
-# Prompt user to enter the name of the destination computer
+# Prompt the user to enter the destination computer name
 $destinationComputer = Read-Host "Enter the name of the destination computer"
 
-# Check if user has access to destination computer
-try {
-    $testConnection = Test-Connection -ComputerName $destinationComputer -Count 1 -ErrorAction Stop
+Write-Host ""
+
+# Start the WinRM service on the destination computer
+Invoke-Command -ComputerName $destinationComputer -ScriptBlock { Start-Service WinRM }
+
+Write-Host ""
+
+# List the available shares on the destination computer
+$shares = Get-CimInstance -ClassName Win32_Share -ComputerName $destinationComputer | Where-Object {$_.Type -eq 0} | Select-Object -ExpandProperty Name
+
+Write-Host ""
+
+# Prompt the user to select the share to use as the backup destination
+$selectedShare = Read-Host "Enter the name of the share to use as the backup destination (`nAvailable shares: $($shares -join ", ")`)"
+
+# Set the destination path to the selected share with the specified folder structure
+$backupFolder = "BACKUPS"
+$selectedUser = $sourceFolder
+$userFolderName = "$selectedUser\$currentUserName"
+$destinationPath = "\\$destinationComputer\$selectedShare\$backupFolder\$sourceComputer\$sourceFolder\$(Get-Date -Format 'MM-dd-yyyy hh-mm-ss tt')"
+
+# Remove any existing drive with the same name as the destination computer
+Remove-PSDrive -Name $destinationComputer -ErrorAction SilentlyContinue
+
+# Connect to the destination computer using the domain account
+New-PSDrive -Name $destinationComputer -PSProvider FileSystem -Root "\\$destinationComputer\$selectedShare" -Credential $credential
+
+# Set start time for calculating the copy operation speed
+$startTime = Get-Date
+
+# Create the destination directory if it does not exist
+if (!(Test-Path -Path $destinationPath))
+{
+    New-Item -ItemType Directory -Path $destinationPath
 }
-catch {
-    Write-Host "Unable to connect to $destinationComputer."
-    exit
+
+# Prompt the user to choose between /B, /MIR, or neither
+$selectedOption = Read-Host @"
+Do you want to use Backup Mode, Mirror Mode, or neither?
+
+ 1. /B   = Backup mode allows Robocopy to bypass file and folder permission 
+           settings during the copy process. This option is useful when you 
+           want to back up files that you might not have permission to access.
+ 
+ 2. /MIR = Mirror option creates a mirror image of the source directory 
+           in the destination directory.
+ 
+ 3. Neither = Do not use /B or /MIR options.
+
+    Would you kindly choose the appropriate backup method?
+"@
+
+# Define the robocopy options based on the user's choice
+switch ($selectedOption) {
+    "1" { $robocopyOptions = "/B" }
+    "2" { $robocopyOptions = "/MIR" }
+    "3" { $robocopyOptions = "" }
+    default {
+        Write-Host "Invalid option selected. Exiting."
+        exit
+    }
 }
 
-$dateString = Get-Date -Format yyyyMMdd-HHmmss
+# Set Log file default destination path.
+$logFolder = "\\$destinationComputer\$selectedShare\LOG_FILES\$sourceComputer\$sourceFolder\$(Get-Date -Format 'MM-dd-yyyy hh-mm-ss tt')\$userFolderName"
+$logFileName = "$sourceComputer-$sourceFolder-$(Get-Date -Format 'MM-dd-yyyy hh-mm-ss tt').log"
+$logFilePath = "$logFolder\$logFileName"
+$logPath = "$logFilePath"
 
-$destinationPath = "\\${destinationComputer}\c$\SunnySave\$sourceComputer-$destinationComputer-$dateString-$env:USERNAME"
+# Create the Log Folder directory if it does not exist
+New-Item -ItemType Directory -Path $logFolder -Force
 
-$logPath = "C:\SunnySave\LOG_FILES\$sourceComputer-$destinationComputer-$dateString-$env:USERNAME.txt"
+# Create the Log file if it does not exist
+New-Item -ItemType File -Force -Path "$logFilePath"
 
-Write-Host "`nRobocopy is now copying files from $sourcePath to $destinationPath`n"
+Invoke-Command -ComputerName $destinationComputer -ScriptBlock {
+    param($logPath, $currentUserName)
+    $acl = Get-Acl $logPath
+    $accessRule = New-Object System.Security.AccessControl.FileSystemAccessRule($currentUserName, 'ReadAndExecute', 'Allow')
+    $acl.SetAccessRule($accessRule)
+    Set-Acl $logPath $acl
+} -ArgumentList $logPath, $currentUserName
 
-Robocopy $sourcePath $destinationPath /E /Z /MT:32 /R:1 /W:1 /FFT /XJ /XA:H /XD "System Volume Information" /XD "$env:USERPROFILE\AppData\Local\Temp" /XD $env:windir\Temp /XD $env:USERPROFILE\RecycleBin /ETA /TEE /NP /LOG+:$logPath /UNILOG:$logPath /COPYALL
+# Start logging to the file
+Start-Transcript -Path $logFilePath -Append
 
-# Add account info to log file
-Add-Content $logPath "Account info: $($env:USERNAME) logged in at $(Get-Date)"
-Add-Content $logPath "Source computer: $sourceComputer"
-Add-Content $logPath "Source folder: $sourceFolder"
-Add-Content $logPath "Source path: $sourcePath"
-Add-Content $logPath "Destination computer: $destinationComputer"
-Add-Content $logPath "Destination path: $destinationPath"
+# Define the Robocopy options
+$robocopyOptions = @(
+    "/E",         # Copy subdirectories, including empty ones
+    "/ETA",       # Show the estimated time of arrival (ETA) of copied files
+    "/TEE",       # Output to console window, as well as the log file
+    "/MT:64",     # Use 64 threads for multi-threaded file copying
+    "/R:5",       # Retry 5 times on failed copies
+    "/W:5",       # Wait 5 seconds between retries
+    "/LOG:$logFilePath"     # Log the output to the specified log file
+)
 
-# Copy the log file to the destination computer
-Copy-Item $logPath "\\${destinationComputer}\c$\SunnySave\LOG_FILES\" 
+# Convert the array of Robocopy options to a single string
+$robocopyOptionsString = ($robocopyOptions + $excludedFolders + $excludedFiles -join " ")
 
-# Close the remote sessions
+# Construct the Robocopy command with the source path, destination path, and options
+$robocopyCmd = "robocopy `"$sourcePath`" `"$destinationPath`" $robocopyOptionsString"
+
+# Execute the Robocopy command
+Invoke-Expression $robocopyCmd
+
+# Calculate the duration of the copy operation
+$endTime = Get-Date
+$duration = New-TimeSpan -Start $startTime -End $endTime
+
+# Calculate the speed of the copy operation
+$size = ((Get-ChildItem $sourcePath -Recurse | Measure-Object -Property Length -Sum).Sum) / 1GB
+$averagespeed = [math]::Round($size / $duration.TotalSeconds, 2)
+
+# Stop logging to the file
+Stop-Transcript
+
+# Calculate copy operation speed and add to log file
+$fileSizeBytes = (Get-ChildItem -Path $sourcePath -Recurse | Measure-Object -Property Length -Sum).Sum
+$elapsedSeconds = [int]((Get-Date) - $startTime).TotalSeconds
+$copySpeedGbps = [Math]::Round($fileSizeBytes / 1GB / $elapsedSeconds, 2)
+Add-Content $logFilePath "Copy operation speed: $copySpeedGbps Gbps"
+
+# Add IP info of Source and Destination computer to log file
+$sourceIP = ((Test-Connection -ComputerName $sourceComputer -Count 1).IPAddressToString)
+$destinationIP = ((Test-Connection -ComputerName $destinationComputer -Count 1).IPAddressToString)
+Add-Content $logFilePath "Source IP: $sourceIP"
+Add-Content $logFilePath "Destination IP: $destinationIP"
+
+# Display the summary of the copy operation
+Write-Host ""
+Write-Host "Copy operation summary:"
+Write-Host "------------------------"
+Write-Host "Source: $sourcePath"
+Write-Host "Destination: $destinationPath"
+$bytesCopied = (Get-ChildItem $destinationPath -Recurse | Measure-Object -Property Length -Sum).Sum
+$sizeInGB = [math]::Round($bytesCopied / 1GB, 2)
+Write-Host "Size: $sizeInGB GB"
+Write-Host ""
+Write-Host "Backup completed successfully!"
+
+# Calculate and display the copy operation speed
+$endTime = Get-Date
+$elapsedTime = New-TimeSpan $startTime $endTime
+$totalSeconds = $elapsedTime.TotalSeconds
+$filesCopied = (Get-ChildItem $sourcePath -Recurse -File).Count
+$averageSpeed = $filesCopied / $totalSeconds
+Write-Host ""
+Write-Host "Copy operation completed in $totalSeconds seconds. Average speed: $([Math]::Round($averageSpeed, 2)) files/second."
+Write-Host ""
+
+# Prompt the user to open the log file and destination path
+$logFilePath = Join-Path $logFolder $logFileName
+$destinationPath = "\\$destinationComputer\$selectedShare\$backupFolder\$sourceComputer\$sourceFolder"
+Write-Host ""
+Write-Host "Copy operation summary:"
+Write-Host "------------------------"
+Write-Host "Source: $sourcePath"
+Write-Host "Destination: $destinationPath"
+Write-Host "Size: $([math]::Round($totalSize / 1MB, 2)) MB"
+Write-Host "Log file: $logFilePath"
+Write-Host ""
+Write-Host "Backup completed successfully!"
+
+# Open the log file and destination path
+Start-Process -FilePath "notepad.exe" -ArgumentList $logFilePath
+Start-Process -FilePath "explorer.exe" -ArgumentList $destinationPath
